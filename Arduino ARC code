@@ -1,0 +1,190 @@
+const int ir_pins[] = {A0, A1, A2, A3, A4, A5, A6, A7};
+const int nbr_s = 8;
+
+#define LED_G 2
+#define LED_B 3
+#define LED_R4 4
+// right Motor Pins
+#define speed_pinR  5    
+#define forward_R   6
+#define backward_R  7
+// left Motor Pins
+#define speed_pinL  10
+#define forward_L   9
+#define backward_L  8
+// finding constants_PID activation pin
+#define tune_pin 13  
+
+// calibration 
+int min[8] = {1023, 1023, 1023, 1023, 1023, 1023, 1023, 1023};
+int max[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+int thresholds[8];
+int read = 0 ;
+
+void calibrateSensors() {
+ unsigned long time = millis(); // millis returns unsigned long 
+ while (millis() - time < 3000) {
+  for (int i = 0; i < 8; i++) {
+     read = analogRead(ir_pins[i]);
+     if (read < min[i]) 
+     min[i] = read;
+     if (read > max[i]) 
+     max[i] = read;
+   }
+   digitalWrite(LED_G, (millis() % 100 < 50) ? HIGH : LOW);
+  }
+  
+ for (int i = 0; i < 8; i++) {
+ thresholds[i] = (min[i] + max[i]) / 2;
+}
+}
+
+// read sensors
+int read_sensors() {
+
+ int result = 0 ; 
+
+ for (int i = 0; i < 8; i++) {
+  int w = 0;
+ for (int j = 0; j < 3; j++) {
+  if (analogRead(ir_pins[i]) > thresholds[i]) w++;
+  }
+  if (w >= 2) {
+  result |= (1 << (7 - i));
+  }
+  }
+  return result; 
+}
+
+// determine line position
+int line_position() {
+ int sensors = read_sensors();
+
+ switch (sensors) {
+   case 0x00: return 2;  // out of track (00000000) 
+   case 0x18: return 3;  // in track (00011000)
+   case 0x30: return 4;  // slightly left (00110000)
+   case 0x0C: return 5;  // slightly right (00001100)
+   case 0x60: return -2; // turn right (01100000)
+   case 0x78: return -2; // turn right (01111000)
+   case 0x06: return 2;  // turn left (00000110)
+   case 0x1E: return 2;  // turn left (00011110)
+   case 0xC0: return -3; // extreme left (11000000)
+   case 0xD8: return -3; // extreme left (11011000)
+   case 0x03: return 3;  // extreme right (00000011)
+   case 0x1B: return 3;  // extreme right (00011011)
+   case 0xFF: return 3;  // intersection 'T' (11111111)
+   default: return 2;    // out of track (default)
+  }
+}
+
+// PID constants
+float Kp = 1.0 ;  
+float Ki = 0.0 ; 
+float Kd = 0.0 ; 
+
+float error_D = 0;  
+float I = 0;  
+
+// motors speed 
+int speed = 150; 
+int speed_LM = speed ;
+int speed_RM = speed ;
+
+void motor_speed(int position) {
+
+ float error = position ; 
+ I += error;  
+ float D = error - error_D; 
+
+ // calculate the PID output
+ float output = Kp*error + Ki*I + Kd*D;
+  // scale the output 
+ float coef_L = 1.0 - output;  
+ float coef_R = 1.0 + output; 
+
+ speed_LM = constrain(speed * coef_L, 0, 255); // adjust left motor's speed
+ speed_RM = constrain(speed * coef_R, 0, 255); // adjust right motor's speed
+
+
+ digitalWrite(forward_L, HIGH);  
+ digitalWrite(backward_L, LOW); 
+ digitalWrite(forward_R, HIGH);  
+ digitalWrite(backward_R, LOW); 
+
+ analogWrite(speed_pinL, speed_LM);  // left motor speed
+ analogWrite(speed_pinR, speed_RM);  // right motor speed
+ 
+
+  // error for the next iteration 
+ error_D = error;
+}
+
+ // finding constants_PID
+
+void constants_PID() {
+  if (digitalRead(tune_pin) == LOW) {
+    return;  // skipping
+  }
+  Serial.println("finding...");
+  float sum_error = 0;
+  float sum_I = 0;
+  float max_error = -100;
+  float min_error = 100;
+  int c = 0; 
+  int prev_error = line_position();
+
+  unsigned long start = millis();
+  while (millis() - start< 5000) { // move forward for 5s
+    int error = line_position();
+
+    sum_error += abs(error);
+    sum_I += error;
+
+    if (min_error > error) 
+     min_error = error;
+    if (max_error < error) 
+     max_error = error;
+
+    motor_speed(error);  
+    prev_error = error;
+    c++;
+  }
+
+  // calculate PID constant
+  float avg_error = sum_error / c ;
+  Kp = 5.0 / avg_error;  // Kp high when aggresive correction needed
+  Ki = 0.02 * (sum_I / c); // Ki low we avoid overshooting
+  Kd = 0.2 * ((max_error - min_error) / c); // Kd low reduce suddent movement
+
+  Serial.print("PID: ");
+  Serial.print(" Kp=");
+  Serial.print(Kp);
+  Serial.print(" Ki=");
+  Serial.print(Ki);
+  Serial.print(" Kd=");
+  Serial.println(Kd);
+}
+
+
+void setup() {
+  Serial.begin(9600);
+  
+  pinMode(speed_pinR, OUTPUT);
+  pinMode(speed_pinL, OUTPUT);
+  pinMode(forward_R, OUTPUT);
+  pinMode(forward_L, OUTPUT);
+  pinMode(backward_R, OUTPUT);
+  pinMode(backward_L, OUTPUT);
+
+  calibrateSensors();
+  constants_PID();
+}
+
+void loop() {
+  // get the position 
+  int position = line_position();
+  // calculates the PID output & set the motors 
+  motor_speed(position);
+
+}
